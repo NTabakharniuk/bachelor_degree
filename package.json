@@ -6,7 +6,8 @@
     "scripts": {
         "dev": "vite",
         "build": "vite build",
-        "preview": "vite preview"
+        "preview": "vite preview",
+        "dew": "vite build && vite preview"
     },
     "dependencies": {
         "@imgly/background-removal": "^1.4.5",
