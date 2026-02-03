@@ -22,9 +22,18 @@ export async function processPhoto(imageData, faceData) {
   try {
     // Load original image
     const img = await loadImage(imageData);
+    // Decide whether to perform an adaptive crop when head is too small
+    const detectedHeadRatio = faceData && (faceData.headSizeRatio || faceData.height / img.height);
+    const desiredHeadRatio = 0.75; // target ~75% of frame height to meet 32-36mm on 45mm photo
 
-    // Step 1: Crop to passport photo dimensions (3:4 ratio)
-    const croppedCanvas = cropToPassportSize(img, faceData);
+    // If head is too small, crop tighter around the face so it fills more of the frame
+    const shouldForceTightCrop = detectedHeadRatio && detectedHeadRatio < desiredHeadRatio;
+
+    const croppedCanvas = cropToPassportSize(
+      img,
+      faceData,
+      shouldForceTightCrop ? desiredHeadRatio : undefined
+    );
 
     // Step 2: Remove background using AI
     const bgRemovedBlob = await removeBackground(croppedCanvas.toDataURL());
@@ -52,36 +61,62 @@ export async function processPhoto(imageData, faceData) {
  * @param {Object} faceData - Face bounding box and landmarks
  * @returns {HTMLCanvasElement} Cropped canvas
  */
-function cropToPassportSize(img, faceData) {
+function cropToPassportSize(img, faceData, targetHeadRatio) {
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
 
   // Passport photo ratio (width:height = 3:4)
   const targetRatio = 3 / 4;
 
-  // Calculate crop dimensions
-  // Head should be 70-80% of frame height, face centered
   const faceHeight = faceData.height;
-  const frameHeight = faceHeight * 1.6; // Include shoulders and space above head
-  const frameWidth = frameHeight * targetRatio;
 
-  // Calculate crop position to center face
-  // Face should be slightly above center (more space above head than below)
+  // If a targetHeadRatio is supplied, calculate the crop so the face fills
+  // that fraction of the frame height. Otherwise use a comfortable framing.
+  let frameHeight;
+  if (targetHeadRatio && targetHeadRatio > 0) {
+    // frameHeight such that faceHeight / frameHeight = targetHeadRatio
+    frameHeight = faceHeight / targetHeadRatio;
+  } else {
+    // Default framing includes shoulders and some headroom
+    frameHeight = faceHeight * 1.6;
+  }
+
+  // Ensure frameHeight does not exceed image height
+  frameHeight = Math.min(frameHeight, img.height);
+  const frameWidth = Math.min(frameHeight * targetRatio, img.width);
+
+  // Centering: face slightly above center (more room above head)
   const faceCenterX = faceData.x + faceData.width / 2;
   const faceCenterY = faceData.y + faceData.height / 2;
 
-  const cropX = faceCenterX - frameWidth / 2;
-  const cropY = faceCenterY - frameHeight * 0.4; // 40% of frame above face center
+  let cropX = faceCenterX - frameWidth / 2;
+  // Default cropY attempts to place face slightly above center
+  let cropY = faceCenterY - frameHeight * 0.4; // 40% above center
 
-  // Set canvas size to crop dimensions
+  // Enforce minimum top margin: at least 10mm from top of head to top of photo
+  // Photo spec: 45 mm total height -> top margin ratio = 10 / 45
+  const TOP_MARGIN_RATIO = 10 / 45;
+  const requiredTopMarginPx = frameHeight * TOP_MARGIN_RATIO;
+  const maxCropYToSatisfyTop = faceData.y - requiredTopMarginPx;
+  if (cropY > maxCropYToSatisfyTop) {
+    cropY = maxCropYToSatisfyTop;
+  }
+
+  // Clamp crop to image bounds
+  if (cropX < 0) cropX = 0;
+  if (cropY < 0) cropY = 0;
+  if (cropX + frameWidth > img.width) cropX = img.width - frameWidth;
+  if (cropY + frameHeight > img.height) cropY = img.height - frameHeight;
+
+  // Set canvas size to final crop dimensions (rounded)
   canvas.width = Math.round(frameWidth);
   canvas.height = Math.round(frameHeight);
 
-  // Draw cropped image
+  // Draw cropped area from original image
   ctx.drawImage(
     img,
-    Math.max(0, cropX),
-    Math.max(0, cropY),
+    cropX,
+    cropY,
     frameWidth,
     frameHeight,
     0,
@@ -108,8 +143,8 @@ function applyWhiteBackgroundAndResize(img) {
   // Calculate final dimensions at 300 DPI
   const DPI = 300;
   const CM_TO_INCH = 0.393701;
-  const WIDTH_CM = 3;
-  const HEIGHT_CM = 4;
+  const WIDTH_CM = 3.5;
+  const HEIGHT_CM = 4.5;
 
   // Final pixel dimensions
   canvas.width = Math.round(WIDTH_CM * CM_TO_INCH * DPI); // 354 pixels
@@ -155,7 +190,7 @@ function applyOptimizations(canvas) {
   const sharpened = applySharpeningFilter(imageData);
 
   // Apply slight contrast enhancement
-  const contrasted = applyContrastAdjustment(sharpened, 1.1);
+  const contrasted = applyContrastAdjustment(sharpened, 1.05);
 
   // Put processed data back
   ctx.putImageData(contrasted, 0, 0);
@@ -173,7 +208,7 @@ function applySharpeningFilter(imageData) {
   const outData = output.data;
 
   // Sharpening kernel (simplified)
-  const sharpenAmount = 0.2;
+  const sharpenAmount = 0.08;
 
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
@@ -182,15 +217,15 @@ function applySharpeningFilter(imageData) {
       for (let c = 0; c < 3; c++) {
         // Calculate sharpened value
         const center = data[idx + c];
-        const above = data[((y - 1) * width + x) * 4 + c];
-        const below = data[((y + 1) * width + x) * 4 + c];
-        const left = data[(y * width + (x - 1)) * 4 + c];
-        const right = data[(y * width + (x + 1)) * 4 + c];
+        const above = data[((y - 1) * width + x) * 4 + c] || center;
+        const below = data[((y + 1) * width + x) * 4 + c] || center;
+        const left = data[(y * width + (x - 1)) * 4 + c] || center;
+        const right = data[(y * width + (x + 1)) * 4 + c] || center;
 
         const average = (above + below + left + right) / 4;
         const sharpened = center + (center - average) * sharpenAmount;
 
-        outData[idx + c] = Math.max(0, Math.min(255, sharpened));
+        outData[idx + c] = Math.max(0, Math.min(255, Math.round(sharpened)));
       }
       outData[idx + 3] = data[idx + 3]; // Alpha channel
     }
@@ -206,18 +241,16 @@ function applySharpeningFilter(imageData) {
  * @param {number} contrast - Contrast factor (1.0 = no change)
  */
 function applyContrastAdjustment(imageData, contrast) {
+  // contrast: 1.0 = no change; >1 increases contrast
   const data = imageData.data;
-  const factor = (259 * (contrast * 255 + 255)) / (255 * (259 - contrast * 255));
-
+  const c = contrast;
   for (let i = 0; i < data.length; i += 4) {
-    // Apply to RGB channels only
-    for (let c = 0; c < 3; c++) {
-      const value = data[i + c];
-      const adjusted = factor * (value - 128) + 128;
-      data[i + c] = Math.max(0, Math.min(255, adjusted));
+    for (let ch = 0; ch < 3; ch++) {
+      const v = data[i + ch];
+      const adjusted = ((v - 128) * c) + 128;
+      data[i + ch] = Math.max(0, Math.min(255, adjusted));
     }
   }
-
   return imageData;
 }
 

@@ -72,22 +72,87 @@ function App() {
   const handleValidation = async (imgData) => {
     setLoading(true);
     setValidationResult(null);
+    // Helper: create tighter crop around face so head occupies targetHeadRatio
+    const createTightCrop = async (dataUrl, faceData, targetHeadRatio = 0.62) => {
+      const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = reject;
+        i.src = dataUrl;
+      });
+
+      const targetRatio = 3 / 4;
+
+      const faceHeight = faceData.height;
+      let frameHeight = faceHeight / targetHeadRatio;
+      frameHeight = Math.min(frameHeight, img.height);
+      const frameWidth = Math.min(frameHeight * targetRatio, img.width);
+
+      const faceCenterX = faceData.x + faceData.width / 2;
+      const faceCenterY = faceData.y + faceData.height / 2;
+
+      let cropX = faceCenterX - frameWidth / 2;
+      // Default positioning slightly above center
+      let cropY = faceCenterY - frameHeight * 0.4;
+
+      // Enforce minimum top margin of 10mm (10/45 of frame height)
+      const TOP_MARGIN_RATIO = 10 / 45;
+      const requiredTopMarginPx = frameHeight * TOP_MARGIN_RATIO;
+      const maxCropYToSatisfyTop = faceData.y - requiredTopMarginPx;
+      if (cropY > maxCropYToSatisfyTop) cropY = maxCropYToSatisfyTop;
+
+      if (cropX < 0) cropX = 0;
+      if (cropY < 0) cropY = 0;
+      if (cropX + frameWidth > img.width) cropX = img.width - frameWidth;
+      if (cropY + frameHeight > img.height) cropY = img.height - frameHeight;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(frameWidth);
+      canvas.height = Math.round(frameHeight);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, cropX, cropY, frameWidth, frameHeight, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/jpeg', 0.95);
+    };
 
     try {
+      // First validation pass
       const result = await validatePhoto(imgData);
       setValidationResult(result);
 
       if (result.isValid) {
-        // Move to processing state, then run processing
         setStep('processing');
         await handleProcessing(imgData, result.faceData);
-      } else {
-        // Keep user on the validation step so they can review failures
-        setStep('validating');
+        return;
       }
+
+      // If failure is due to head too small, attempt auto-crop and re-validate once
+      const headRatio = result.faceData && result.faceData.headSizeRatio;
+      const minRatio = 32 / 45; // same threshold as validation (32 mm on 45 mm photo)
+      const desiredHeadRatio = 0.75; // aim for mid-range head size after auto-crop
+
+      if (headRatio && headRatio < minRatio) {
+        try {
+          const croppedData = await createTightCrop(imgData, result.faceData, desiredHeadRatio);
+          // Re-run validation on cropped image
+          const secondResult = await validatePhoto(croppedData);
+          setValidationResult(secondResult);
+
+          if (secondResult.isValid) {
+            // update displayed image to cropped one and proceed
+            setImageData(croppedData);
+            setStep('processing');
+            await handleProcessing(croppedData, secondResult.faceData);
+            return;
+          }
+        } catch (cropErr) {
+          console.warn('Auto-crop attempt failed:', cropErr);
+        }
+      }
+
+      // If we reach here, validation failed (and auto-crop didn't fix it)
+      setStep('validating');
     } catch (err) {
       setError(`Validation failed: ${err.message}`);
-      // Keep user on the validation step to show the error
       setStep('validating');
     } finally {
       setLoading(false);
