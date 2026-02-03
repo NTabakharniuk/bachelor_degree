@@ -110,6 +110,8 @@ export async function validatePhoto(imageData) {
       width: box.width,
       height: box.height,
       landmarks: landmarks,
+      // include head size ratio to help processing decide if auto-crop/zoom is needed
+      headSizeRatio: box.height / img.height,
     };
 
     // Check 2: Face is frontal (calculate angles)
@@ -151,20 +153,25 @@ export async function validatePhoto(imageData) {
     if (!fullyInFrame) result.isValid = false;
 
     // Check 5: Head size is appropriate
-    const headSizeRatio = box.height / img.height;
-    const minRatio = 0.5; // At least 50% of image height
-    const maxRatio = 0.75; // At most 75% of image height
+    // Requirements: Photo format 35×45 mm, recommended head height ~33–34 mm
+    // Face should occupy ~70–80% of the frame height
+    const PHOTO_HEIGHT_MM = 45;
+    const MIN_RATIO = 0.7; // 70%
+    const MAX_RATIO = 0.8; // 80%
 
-    if (headSizeRatio < minRatio || headSizeRatio > maxRatio) {
+    const headSizeRatio = box.height / img.height;
+    const headSizeMm = headSizeRatio * PHOTO_HEIGHT_MM;
+
+    if (headSizeRatio < MIN_RATIO || headSizeRatio > MAX_RATIO) {
       result.checks.headSize = {
         passed: false,
-        message: `Head size ${headSizeRatio < minRatio ? 'too small' : 'too large'} (${(headSizeRatio * 100).toFixed(0)}% of frame)`,
+        message: `Head size ${headSizeRatio < MIN_RATIO ? 'too small' : 'too large'} (${headSizeMm.toFixed(0)} mm of ${PHOTO_HEIGHT_MM} mm)`,
       };
       result.isValid = false;
     } else {
       result.checks.headSize = {
         passed: true,
-        message: `Head size appropriate (${(headSizeRatio * 100).toFixed(0)}% of frame) ✓`,
+        message: `Head size appropriate (${headSizeMm.toFixed(0)} mm of ${PHOTO_HEIGHT_MM} mm, ${(headSizeRatio*100).toFixed(0)}% of frame) ✓`,
       };
     }
 
