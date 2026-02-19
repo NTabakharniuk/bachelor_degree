@@ -30,7 +30,9 @@ export async function loadModels() {
   if (modelsLoaded) return;
 
   try {
-    const MODEL_URL = '/models'; // Correct path for Vite-compatible projects
+    // Respect Vite base path (e.g. /bachelor_degree/ on GitHub Pages)
+    const baseUrl = import.meta.env.BASE_URL || '/';
+    const MODEL_URL = `${baseUrl.replace(/\/$/, '')}/models`;
 
     // Load required models
     await Promise.all([
